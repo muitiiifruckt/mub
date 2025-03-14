@@ -1,152 +1,202 @@
 import socket
 import threading
 import hashlib
-from tkinter import Tk, Entry, Button, Text, END, messagebox, Label
-from tkinter import Tk, Toplevel, Label, Button
-# Настройки клиента
-HOST = '127.0.0.1'  # IP для прослушивания
-PORT = 12345        # Порт для прослушивания
-PEER_HOST = '127.0.0.1'  # IP другого клиента
-PEER_PORT = 54321        # Порт другого клиента
-SIZE = "500x400"
-# Файл для хранения пользователей
-USERS_FILE = "users.txt"
+import random
+import string
+import logging
+import tkinter as tk
+from tkinter import scrolledtext, messagebox
+from sqlalchemy import create_engine, Column, Integer, String, UniqueConstraint
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
 
-# Функция для хэширования пароля
-def hash_password(password):
-    return hashlib.md5(password.encode('utf-8')).hexdigest()
+# Настройка логирования
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Функция для регистрации нового пользователя
-def register(username, password):
-    with open(USERS_FILE, "a") as file:
-        file.write(f"{username}:{hash_password(password)}\n")
-    messagebox.showinfo("Успех", "Регистрация прошла успешно!")
+# Создаем базовый класс для моделей
+Base = declarative_base()
 
-# Функция для аутентификации пользователя
-def authenticate(username, password):
-    with open(USERS_FILE, "r") as file:
-        for line in file:
-            stored_username, stored_hash = line.strip().split(":")
-            if stored_username == username and stored_hash == hash_password(password):
-                return True
-    return False
+# Определяем модель User
+class User(Base):
+    __tablename__ = 'users'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String(50), unique=True, nullable=False)
+    password = Column(String(32), nullable=False)  # MD5-хэш всегда 32 символа
+    __table_args__ = (UniqueConstraint('username', name='unique_username'),)
 
-# Функция для прослушивания входящих сообщений
-def listen_for_messages():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
-        server_socket.bind((HOST, PORT))
-        server_socket.listen()
-        print(f"Слушаем на {HOST}:{PORT}")
+# Создаем соединение с базой данных (SQLite)
+engine = create_engine('sqlite:///users.db', echo=False)
+Base.metadata.create_all(engine)
+Session = sessionmaker(bind=engine)
+
+def get_session():
+    return Session()
+
+def md5(text):
+    hashed = hashlib.md5(text.encode('utf-8')).hexdigest()
+    logging.info(f"MD5('{text}') = {hashed}")
+    return hashed
+
+def gen_str(length=32):
+    random_str = ''.join(random.choices(string.ascii_letters + string.digits, k=length))
+    logging.info(f"Generated nonce: {random_str}")
+    return random_str
+
+def get_password_hash(username):
+    session = get_session()
+    try:
+        user = session.query(User).filter_by(username=username).first()
+        if user:
+            logging.info(f"User '{username}' found with stored hash: {user.password}")
+        else:
+            logging.warning(f"User '{username}' not found.")
+        return user.password if user else None
+    finally:
+        session.close()
+
+class ChatApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Chat Authentication")
+        self.create_login_screen()
+
+    def create_login_screen(self):
+        self.clear_window()
+        tk.Label(self.root, text="Username:").pack()
+        self.username_entry = tk.Entry(self.root)
+        self.username_entry.pack()
+        tk.Label(self.root, text="Password:").pack()
+        self.password_entry = tk.Entry(self.root, show="*")
+        self.password_entry.pack()
+        tk.Button(self.root, text="Login", command=self.start_client).pack()
+        tk.Button(self.root, text="Start Server", command=self.start_server).pack()
+
+    def clear_window(self):
+        for widget in self.root.winfo_children():
+            widget.destroy()
+
+    def start_server(self):
+        threading.Thread(target=self.run_server_gui, daemon=True).start()
+
+    def run_server_gui(self):
+        self.server_root = tk.Tk()
+        self.server_root.title("Server Console")
+        self.server_log = scrolledtext.ScrolledText(self.server_root, state='disabled')
+        self.server_log.pack()
+        self.server_msg_entry = tk.Entry(self.server_root)
+        self.server_msg_entry.pack()
+        tk.Button(self.server_root, text="Send", command=self.send_server_message).pack()
+        threading.Thread(target=self.run_server, daemon=True).start()
+        self.server_root.mainloop()
+
+    def send_server_message(self):
+        if hasattr(self, 'server_conn'):
+            msg = self.server_msg_entry.get()
+            self.server_conn.sendall(msg.encode())
+            self.server_log.configure(state='normal')
+            self.server_log.insert(tk.END, "Server: " + msg + "\n")
+            self.server_log.configure(state='disabled')
+            self.server_msg_entry.delete(0, tk.END)
+        else:
+            messagebox.showerror("Error", "No client connected.")
+
+    def run_server(self):
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.bind(("127.0.0.1", 5000))
+        server.listen(1)
+        logging.info("Server listening on 127.0.0.1:5000")
+        self.log_message("Server started on 127.0.0.1:5000")
+        self.server_conn, addr = server.accept()
+        self.log_message(f"Client connected: {addr}")
+        self.handle_client(self.server_conn, addr)
+
+        # Запускаем поток для приема сообщений от клиента
+        threading.Thread(target=self.receive_server_messages, daemon=True).start()
+
+    def log_message(self, message):
+        self.server_log.configure(state='normal')
+        self.server_log.insert(tk.END, message + "\n")
+        self.server_log.configure(state='disabled')
+
+    def handle_client(self, conn, addr):
+        username = conn.recv(1024).decode()
+        stored_hash = get_password_hash(username)
+        if not stored_hash:
+            conn.sendall(b'FAIL')
+            return
+        nonce = gen_str()
+        conn.sendall(nonce.encode())
+        client_hash = conn.recv(1024).decode()
+        server_hash = md5(nonce + stored_hash)
+        if client_hash == server_hash:
+            conn.sendall(b'SUCCESS')
+            self.log_message("Authentication successful.")
+        else:
+            conn.sendall(b'FAIL')
+            self.log_message("Authentication failed.")
+
+    def receive_server_messages(self):
         while True:
-            client_socket, client_address = server_socket.accept()
-            print(f"Подключен клиент: {client_address}")
-            while True:
-                try:
-                    message = client_socket.recv(1024).decode('utf-8')
-                    if not message:
-                        break
-                    chat_box.insert(END, f"Другой клиент: {message}\n")
-                except Exception as e:
-                    print(f"Ошибка: {e}")
+            try:
+                data = self.server_conn.recv(1024)
+                if not data:
                     break
-            client_socket.close()
+                self.server_log.configure(state='normal')
+                self.server_log.insert(tk.END, f"Client: {data.decode()}\n")
+                self.server_log.configure(state='disabled')
+            except Exception as e:
+                logging.error(f"Error receiving message: {e}")
+                break
 
-# Функция для отправки сообщений
-def send_message():
-    message = entry.get()
-    if message:
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
-                client_socket.connect((PEER_HOST, PEER_PORT))
-                client_socket.send(message.encode('utf-8'))
-            entry.delete(0, END)
-        except Exception as e:
-            messagebox.showerror("Ошибка", f"Не удалось отправить сообщение: {e}")
-
-# Функция для отображения окна регистрации
-def show_register_window():
-    register_window = Tk()
-    register_window.title("Регистрация")
-    register_window.geometry(SIZE)
-
-    Label(register_window, text="Логин:").pack()
-    register_username_entry = Entry(register_window)
-    register_username_entry.pack()
-
-    Label(register_window, text="Пароль:").pack()
-    register_password_entry = Entry(register_window, show="*")
-    register_password_entry.pack()
-
-    def perform_register():
-        username = register_username_entry.get()
-        password = register_password_entry.get()
-        if username and password:
-            register(username, password)
-            register_window.destroy()
+    def start_client(self):
+        username = self.username_entry.get()
+        password = self.password_entry.get()
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect(("127.0.0.1", 5000))
+        sock.sendall(username.encode())
+        nonce = sock.recv(1024).decode()
+        if nonce == 'FAIL':
+            messagebox.showerror("Error", "Authentication failed: User not found.")
+            return
+        hashed_password = md5(password)
+        final_hash = md5(nonce + hashed_password)
+        sock.sendall(final_hash.encode())
+        response = sock.recv(1024).decode()
+        if response == 'SUCCESS':
+            self.create_chat_screen(sock, "Client")
         else:
-            messagebox.showerror("Ошибка", "Логин и пароль не могут быть пустыми!")
+            messagebox.showerror("Error", "Authentication failed.")
 
-    Button(register_window, text="Зарегистрироваться", command=perform_register).pack()
-    register_window.mainloop()
+    def create_chat_screen(self, sock, role):
+        self.clear_window()
+        self.chat_log = scrolledtext.ScrolledText(self.root, state='disabled')
+        self.chat_log.pack()
+        self.msg_entry = tk.Entry(self.root)
+        self.msg_entry.pack()
+        tk.Button(self.root, text="Send", command=lambda: self.send_message(sock)).pack()
+        threading.Thread(target=self.receive_messages, args=(sock, role), daemon=True).start()
 
-# Функция для отображения окна аутентификации
-def show_auth_window():
-    auth_window = Tk()
-    auth_window.title("Аутентификация")
-    auth_window.geometry(SIZE)
+    def send_message(self, sock):
+        msg = self.msg_entry.get()
+        sock.sendall(msg.encode())
+        self.chat_log.configure(state='normal')
+        self.chat_log.insert(tk.END, "You: " + msg + "\n")
+        self.chat_log.configure(state='disabled')
+        self.msg_entry.delete(0, tk.END)
 
-    Label(auth_window, text="Логин:").pack()
-    auth_username_entry = Entry(auth_window)
-    auth_username_entry.pack()
+    def receive_messages(self, sock, name):
+        while True:
+            try:
+                data = sock.recv(1024)
+                if not data:
+                    break
+                self.chat_log.configure(state='normal')
+                self.chat_log.insert(tk.END, f"{name}: {data.decode()}\n")
+                self.chat_log.configure(state='disabled')
+            except:
+                break
 
-    Label(auth_window, text="Пароль:").pack()
-    auth_password_entry = Entry(auth_window, show="*")
-    auth_password_entry.pack()
-
-    def perform_auth():
-        username = auth_username_entry.get()
-        password = auth_password_entry.get()
-        if username and password:
-            if authenticate(username, password):
-                auth_window.destroy()
-                root.deiconify()  # Показываем основное окно чата
-            else:
-                messagebox.showerror("Ошибка", "Неверный логин или пароль!")
-        else:
-            messagebox.showerror("Ошибка", "Логин и пароль не могут быть пустыми!")
-
-    Button(auth_window, text="Войти", command=perform_auth).pack()
-    auth_window.mainloop()
-root = Tk()
-root.title("P2P Мессенджер")
-root.withdraw()  # Скрываем основное окно до аутентификации
-
-# Поле для ввода сообщения
-entry = Entry(root, width=50)
-entry.pack(pady=10)
-
-# Кнопка отправки
-send_button = Button(root, text="Отправить", command=send_message)
-send_button.pack()
-
-# Окно чата
-chat_box = Text(root, width=60, height=20)
-chat_box.pack(pady=10)
-
-# Запуск потока для прослушивания сообщений
-threading.Thread(target=listen_for_messages, daemon=True).start()
-
-# Отображение окна регистрации или аутентификации
-def startup():
-    choice = choice = messagebox.askquestion("Выбор", "У вас есть аккаунт?")
-    if choice == "yes":
-        show_auth_window()
-    else:
-        show_register_window()
-        show_auth_window()
-
-# Запуск начального окна
-startup()
-
-# Запуск GUI
-root.mainloop()
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = ChatApp(root)
+    root.mainloop()

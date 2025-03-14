@@ -86,7 +86,18 @@ def check_user_word_order(username, password):
             return False
     finally:
         session.close()
+def get_password_hash(username):
+    session = get_session()
+    try:
 
+        user = session.query(User).filter_by(username=username).first()
+        if user:
+            return user.password
+        else:
+            print("Неверный логин или пароль.")
+            return False
+    finally:
+        session.close()
 # Код ниже теперь выполняется только при прямом запуске скрипта
 if __name__ == "__main__":
     add_user('user1', 'password123')
