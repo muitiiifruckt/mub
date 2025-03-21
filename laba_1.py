@@ -11,8 +11,9 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from sympy import randprime, primitive_root
 from models import get_session, User, get_password_hash
-from decod import gen_str, md5, gen_a_g_p,generate_prime
+from decod import gen_str, md5, gen_a_g_p,generate_prime,sha256
 import arc4
+from rsa_gen import generate_rsa_keys
 # Настройка логирования
 
 
@@ -106,8 +107,25 @@ class ChatApp:
         tk.Button(self.server_root, text="Send", command=self.send_server_message).pack(pady=5)
         tk.Button(self.server_root, text="Регистрация", command=self.open_registration_window).pack(pady=5)
         tk.Button(self.server_root, text="Диффи-хелман", command=self.diffi_helman).pack(pady=5)
+        tk.Button(self.server_root, text="ЭЦП", command=self.podpis_server).pack(pady=5)
         threading.Thread(target=self.run_server, daemon=True).start()
         self.server_root.mainloop()
+    def podpis_server(self,file_name = "file.txt"):
+        with open(file_name, "rb") as f:  # Открываем в бинарном режиме
+            file_data = f.read()
+        hash = sha256(file_data)
+        print("hash file----------------", hash)
+        bits = 512
+        public_key, private_key = generate_rsa_keys(bits)
+        d, N = private_key
+        e, N = public_key
+        print(f"e,N = {e},{N}")
+        print(f"d,N = {d},{N}")
+        podpis =  pow(hash, d, N)
+        print("proverka---------------", pow(podpis,e,N))
+        msg = f"podpis:{podpis}:{e}:{N}"
+        
+        self.send_server_message(msg)
     def diffi_helman(self):
         try:
             # Генерация параметров
@@ -294,6 +312,7 @@ class ChatApp:
                 self.chat_log.insert(tk.END, "You enc: " + msg + "\n")
                 self.chat_log.configure(state='disabled')
                 self.msg_entry.delete(0, tk.END)
+                
             except:
                 print("Зашифрованное не сообщение отправлено клиентом")
         else:
@@ -323,6 +342,27 @@ class ChatApp:
                             self.chat_log.configure(state='normal')
                             self.chat_log.insert(tk.END, f"Расшифровано {name}: {data}\n")
                             self.chat_log.configure(state='disabled')
+                            if "podpis" in data:
+                                file_name = "file.txt"
+                                print(1)
+                                _,podpis,e,N = data.split(":")
+                                with open(file_name, "rb") as f:  # Открываем в бинарном режиме
+                                    file_data = f.read()
+                                hash_value = sha256(file_data)  # Вычисляем хэш файла
+                                print("hash file", hash_value)
+                                # Преобразуем строковые данные в числа
+                                podpis = int(podpis)
+                                e = int(e)
+                                N = int(N)
+                                print(2)
+                                # Расшифровываем подпись (получаем оригинальный хэш)
+                                decrypted_hash = pow(podpis, e, N)
+                                print(3)
+                                # Сравниваем с вычисленным хэшем
+                                if decrypted_hash == hash_value:
+                                    print("✅ Подпись верна!")
+                                else:
+                                    print("❌ Подпись неверна!")
                         except:
                             print("Клиент не расшифрвоал")
                     else:
