@@ -9,50 +9,19 @@ from tkinter import scrolledtext, messagebox
 from sqlalchemy import create_engine, Column, Integer, String, UniqueConstraint
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-
+from sympy import randprime, primitive_root
+from models import get_session, User, get_password_hash
+from decod import gen_str, md5, gen_a_g_p,generate_prime
+import arc4
 # Настройка логирования
+
+
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Создаем базовый класс для моделей
-Base = declarative_base()
 
-# Определяем модель User
-class User(Base):
-    __tablename__ = 'users'
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    username = Column(String(50), unique=True, nullable=False)
-    password = Column(String(32), nullable=False)  # MD5-хэш всегда 32 символа
-    __table_args__ = (UniqueConstraint('username', name='unique_username'),)
 
-# Создаем соединение с базой данных (SQLite)
-engine = create_engine('sqlite:///users.db', echo=False)
-Base.metadata.create_all(engine)
-Session = sessionmaker(bind=engine)
 
-def get_session():
-    return Session()
-
-def md5(text):
-    hashed = hashlib.md5(text.encode('utf-8')).hexdigest()
-    logging.info(f"MD5('{text}') = {hashed}")
-    return hashed
-
-def gen_str(length=32):
-    random_str = ''.join(random.choices(string.ascii_letters + string.digits, k=length))
-    logging.info(f"Generated nonce: {random_str}")
-    return random_str
-
-def get_password_hash(username):
-    session = get_session()
-    try:
-        user = session.query(User).filter_by(username=username).first()
-        if user:
-            logging.info(f"User '{username}' found with stored hash: {user.password}")
-        else:
-            logging.warning(f"User '{username}' not found.")
-        return user.password if user else None
-    finally:
-        session.close()
 
 class ChatApp:
     def __init__(self, root):
@@ -83,9 +52,9 @@ class ChatApp:
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             # Привязываем клиентский сокет к порту 54321
-            self.sock.bind(("127.0.0.1", 54321))
+            self.sock.bind(("127.0.0.2", 54321))
             # Подключаемся к серверу на порту 12345
-            self.sock.connect(("127.0.0.1", 12345))
+            self.sock.connect(("127.0.0.2", 12345))
         except Exception as e:
             messagebox.showerror("Ошибка", f"Не удалось подключиться к серверу: {e}")
             return
@@ -136,9 +105,20 @@ class ChatApp:
         self.server_msg_entry.pack(padx=10, pady=5)
         tk.Button(self.server_root, text="Send", command=self.send_server_message).pack(pady=5)
         tk.Button(self.server_root, text="Регистрация", command=self.open_registration_window).pack(pady=5)
+        tk.Button(self.server_root, text="Диффи-хелман", command=self.diffi_helman).pack(pady=5)
         threading.Thread(target=self.run_server, daemon=True).start()
         self.server_root.mainloop()
-
+    def diffi_helman(self):
+        try:
+            # Генерация параметров
+            a, g, p = gen_a_g_p()    
+            self.a = a 
+            self.p = p 
+            message = f"DIFFI_HELMAN:{a}:{g}:{p}"
+            self.send_server_message(message)
+        except:
+            pass
+    
     def open_registration_window(self):
         reg_window = tk.Toplevel(self.server_root)
         reg_window.title("Регистрация нового пользователя")
@@ -176,21 +156,41 @@ class ChatApp:
         finally:
             session.close()
 
-    def send_server_message(self):
+    def send_server_message(self,msg = None):
         if hasattr(self, 'server_conn'):
-            msg = self.server_msg_entry.get()
-            self.server_conn.sendall(msg.encode())
-            self.server_log.configure(state='normal')
-            self.server_log.insert(tk.END, "Server: " + msg + "\n")
-            self.server_log.configure(state='disabled')
-            self.server_msg_entry.delete(0, tk.END)
+            if not msg:
+                msg = self.server_msg_entry.get()
+            cipher = None
+            try:
+                cipher = self.cipher2
+            except:
+                pass
+            data = msg
+            if cipher:
+                try:
+                    data = cipher.encrypt(data.encode())
+                    self.server_conn.sendall(data)
+                    
+                    self.server_log.configure(state='normal')
+                    self.server_log.insert(tk.END, "Server enc: " + msg + "\n")
+                    self.server_log.configure(state='disabled')
+                    self.server_msg_entry.delete(0, tk.END)
+                    print("Сервер отправил зашифровав", data)
+                except:
+                    print("Сервер не отправил зашифровав")
+            else:
+                self.server_conn.sendall(msg.encode())
+                self.server_log.configure(state='normal')
+                self.server_log.insert(tk.END, "Server: " + msg + "\n")
+                self.server_log.configure(state='disabled')
+                self.server_msg_entry.delete(0, tk.END)
         else:
             messagebox.showerror("Error", "No client connected.")
 
     def run_server(self):
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         # Сервер слушает на порту 12345
-        server.bind(("127.0.0.1", 12345))
+        server.bind(("127.0.0.2", 12345))
         server.listen(1)
         logging.info("Server listening on 127.0.0.1:12345")
         self.log_message("Server started on 127.0.0.1:12345")
@@ -221,19 +221,48 @@ class ChatApp:
             conn.sendall(b'FAIL')
             self.log_message("Authentication failed.")
 
+        
     def receive_server_messages(self):
         while True:
             try:
                 data = self.server_conn.recv(1024)
-                if not data:
-                    break
-                self.server_log.configure(state='normal')
-                self.server_log.insert(tk.END, f"Client: {data.decode()}\n")
-                self.server_log.configure(state='disabled')
+                print(data,"принято")
+                cipher = None
+                try:
+                    cipher = self.cipher
+                except:
+                    pass
+                if cipher:
+                    try:
+                        print("DECRYPT")
+                        data = cipher.decrypt(data).decode()
+                        print(data, "Расшифрано")
+                        self.server_log.configure(state='normal')
+                        self.server_log.insert(tk.END, f"Client Расшифровано : {data}\n")
+                        
+                        self.server_log.configure(state='disabled')
+                        print("вставлено в чат")
+                    except:
+                        print("сервер не расшифрвоал")
+                else:
+                    if data.decode().startswith("DIFFI_HELMAN_RESPONSE"):
+                            self.diffi_server(data.decode())
+                    self.server_log.configure(state='normal')
+                    self.server_log.insert(tk.END, f"Client: {data.decode()}\n")
+                    
+                    self.server_log.configure(state='disabled')
             except Exception as e:
                 logging.error(f"Error receiving message: {e}")
-                break
-
+                
+    def diffi_server(self,data):   
+        _, B = data.split(":")
+        B = int(B)
+        k = pow(B,self.a,self.p)
+        self.secret = k
+        print(self.secret, "SERVER")
+        key_bytes = k.to_bytes((k.bit_length() + 7) // 8, byteorder='big')  # Преобразуем в байты
+        self.cipher = arc4.ARC4(key_bytes)  # Передаем в ARC4
+        self.cipher2 = arc4.ARC4(key_bytes)  # Передаем в ARC4
     def create_chat_screen(self, sock, role):
         self.clear_window()
         self.chat_log = scrolledtext.ScrolledText(self.root, state='disabled')
@@ -243,27 +272,92 @@ class ChatApp:
         tk.Button(self.root, text="Send", command=lambda: self.send_message(sock)).pack(pady=5)
         threading.Thread(target=self.receive_messages, args=(sock, role), daemon=True).start()
 
-    def send_message(self, sock):
-        msg = self.msg_entry.get()
-        sock.sendall(msg.encode())
-        self.chat_log.configure(state='normal')
-        self.chat_log.insert(tk.END, "You: " + msg + "\n")
-        self.chat_log.configure(state='disabled')
-        self.msg_entry.delete(0, tk.END)
+    def send_message(self, sock, msg = None):
+        if not msg:
+            msg = self.msg_entry.get()
+        cipher = None
+        try:
+            cipher = self.cipher2
+        except:
+            pass
+        data = msg
+        if cipher:
+            try:
+                
+                print(data , "data до шфирвоани")
+                data = cipher.encrypt(data.encode())
+                print(data , "data после шифрвония")
+  
+                sock.sendall(data)
+                print("Зашифрованное сообщение отправлено", data)
+                self.chat_log.configure(state='normal')
+                self.chat_log.insert(tk.END, "You enc: " + msg + "\n")
+                self.chat_log.configure(state='disabled')
+                self.msg_entry.delete(0, tk.END)
+            except:
+                print("Зашифрованное не сообщение отправлено клиентом")
+        else:
+            sock.sendall(msg.encode())
+            self.chat_log.configure(state='normal')
+            self.chat_log.insert(tk.END, "You: " + msg + "\n")
+            self.chat_log.configure(state='disabled')
+            self.msg_entry.delete(0, tk.END)
 
     def receive_messages(self, sock, name):
         while True:
             try:
                 data = sock.recv(1024)
-                if not data:
-                    break
-                self.chat_log.configure(state='normal')
-                self.chat_log.insert(tk.END, f"{name}: {data.decode()}\n")
-                self.chat_log.configure(state='disabled')
+                if data:
+                    print("Принято клиентом",data)
+                    cipher = None
+                    try:
+                        cipher = self.cipher
+                    except:
+                        pass
+                    
+                    if cipher:
+                        try:
+                            print("DECRYPT")
+                            data = cipher.decrypt(data).decode()
+                            print(data, "Расшифрано")
+                            self.chat_log.configure(state='normal')
+                            self.chat_log.insert(tk.END, f"Расшифровано {name}: {data}\n")
+                            self.chat_log.configure(state='disabled')
+                        except:
+                            print("Клиент не расшифрвоал")
+                    else:
+                        self.chat_log.configure(state='normal')
+                        self.chat_log.insert(tk.END, f"{name}: {data.decode()}\n")
+                        self.chat_log.configure(state='disabled')
+                        if data.decode().startswith("DIFFI_HELMAN"):
+                            self.diffi_client(data.decode())
             except:
-                break
+                logging.warning("ошибка при принятии сообщения клинетом")
+    def diffi_client(self,data):
+        
+        # Обработка сообщения DIFFI_HELMAN
+        _, a, g, p = data.split(":")
+        a = int(a)
+        g = int(g)
+        p = int(p)
+        # Вычисляем B = g^b mod p (где b — случайное число на сервере)
+        b = random.randint(1, p-1)
+        B = pow(g, b, p)
+        # Вычисляем общий секретный ключ
+        A = pow(g, a, p)
+        secret_key = pow(A, b, p)
+        self.secret = secret_key
 
+        # Отправляем B клиенту
+        self.send_message(self.sock, f"DIFFI_HELMAN_RESPONSE:{B}")
+        self.cipher = arc4.ARC4(secret_key)
+        self.cipher2 = arc4.ARC4(secret_key)  # Передаем в ARC4
+
+
+      
 if __name__ == "__main__":
+
     root = tk.Tk()
     app = ChatApp(root)
     root.mainloop()
+    

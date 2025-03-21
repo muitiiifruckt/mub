@@ -2,6 +2,8 @@ import hashlib
 from sqlalchemy import create_engine, Column, Integer, String, UniqueConstraint
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+import logging
+
 
 # Создаем базовый класс для моделей
 Base = declarative_base()
@@ -29,6 +31,17 @@ def get_session():
 def hash_password(password):
     return hashlib.md5(password.encode('utf-8')).hexdigest()
 
+def get_password_hash(username):
+    session = get_session()
+    try:
+        user = session.query(User).filter_by(username=username).first()
+        if user:
+            logging.info(f"User '{username}' found with stored hash: {user.password}")
+        else:
+            logging.warning(f"User '{username}' not found.")
+        return user.password if user else None
+    finally:
+        session.close()
 # Функция для добавления нового пользователя
 def add_user(username, password):
     session = get_session()
